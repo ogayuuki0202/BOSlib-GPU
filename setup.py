@@ -18,6 +18,7 @@ PYTHON_REQUIRES = ">=3.6"
 INSTALL_REQUIRES = [
     'numpy>=1.20.3, <2.0',
     'tqdm >=4.0',
+    'pandas >=1.0',
 ]
 
 EXTRAS_REQUIRE = {
