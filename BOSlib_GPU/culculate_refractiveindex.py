@@ -97,7 +97,6 @@ def SOR_3D_GPU(tensor_laplacian: torch.tensor,device:str, omega_SOR: float,e: fl
 
     Parameters:
     tensor_laplacian (torch.tensor): Input Laplacian array with shape [N, Ly, Lz].
-    batch_size (int): Number of samples per batch.If you use CPU for the processing,Batchsize=1 is recomennded.
     device (str) : 'cuda' or 'cpu'
     omega_SOR (float): Relaxation factor for SOR, controls the convergence speed.
     e (float): Tolerance for stopping the iterative process based on residual.
@@ -132,13 +131,17 @@ def SOR_3D_GPU(tensor_laplacian: torch.tensor,device:str, omega_SOR: float,e: fl
         u[1:-1,1:-1,1:-1] = (u_in[2:,1:-1,1:-1] + u_in[:-2,1:-1,1:-1] +
                         u_in[1:-1,2:,1:-1] + u_in[1:-1,:-2,1:-1] + 
                         u_in[1:-1,1:-1,2:] + u_in[1:-1,1:-1,:-2] +tensor_laplacian[1:-1, 1:-1, 1:-1]) /6 
+        
 
-        u[0][:][:]=0
-        u[Lx-1][:][:]=0
-        u[:][0][:]=0
-        u[:][Ly-1][:]=0
-        u[:][:][0]=0
-        u[:][:][Lz-1]=0
+
+        
+
+        u[0,   :,   :] = 0
+        u[-1,  :,   :] = 0
+        u[:,   0,   :] = 0
+        u[:,  -1,   :] = 0
+        u[:,   :,   0] = 0
+        u[:,   :,  -1] = 0
 
         # Compute max absolute change (delta) for convergence
         delta = torch.max(torch.abs(u - u_in))
