@@ -88,7 +88,7 @@ def SOR_2D_GPU(tensor_laplacian: torch.tensor, batch_size: int,device:str, omega
 
     return np.array(u_tensor.cpu())
 
-def SOR_3D_GPU(tensor_laplacian: torch.tensor, batch_size: int,device:str, omega_SOR: float,e: float,tolerance:float =1e-24,max_stable_iters:int=1000000):
+def SOR_3D_GPU(tensor_laplacian: torch.tensor,device:str, omega_SOR: float,e: float,tolerance:float =1e-24,max_stable_iters:int=1000000):
     """
     Perform Successive Over-Relaxation (SOR) on a Laplacian array using GPU.
 
@@ -119,7 +119,7 @@ def SOR_3D_GPU(tensor_laplacian: torch.tensor, batch_size: int,device:str, omega
 
     
     # Initialize u for SOR iterations
-    u = torch.zeros([batch_size, Ly, Lz], device=device)
+    u = torch.zeros([Lx, Ly, Lz], device=device)
     delta = 1.0
     stable_count = 0  # Reset stable count for each batch
     prev_delta = float('inf')  # Initialize previous delta
