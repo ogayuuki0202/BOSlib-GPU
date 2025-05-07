@@ -45,8 +45,8 @@ or clone using git
 
 ## Methods
 
-Please see our wiki below.
-[Wiki](https://github.com/ogayuuki0202/BOSlib-GPU/wiki)
+Please see our Documentation below.
+[Documentation](https://foamy-trilby-a77.notion.site/BOSlib-Documentation-1b2338a536ad8050ac53ee2d606b68e5?pvs=4)
 
 ## Contributors
 Pleae refer original [BOSlib]((https://github.com/ogayuuki0202/BOSlib)
