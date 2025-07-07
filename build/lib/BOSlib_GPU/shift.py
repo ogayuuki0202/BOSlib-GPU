@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import pandas as pd
+import cv2
 
 def S_BOS_GPU(image_ref, image_exp, device, batch_size=5000):
     """
@@ -203,3 +204,213 @@ def S_BOS_GPU(image_ref, image_exp, device, batch_size=5000):
     delta_h = phi_2D / (2 * np.pi * f1)
     
     return delta_h
+
+def SP_BOS_GPU(ref,exp,kernel_height,batch_size=1000000):
+    # Make sure that GPU is available 
+    device=torch.device('cuda' if torch.cuda.is_available() else 'cpu') 
+    print(device)
+    # 画像の読み込み (Grayscale)
+    ref_image = torch.tensor(ref, dtype=torch.float32, device=device)
+    exp_image = torch.tensor(exp, dtype=torch.float32, device=device)
+
+    # 二値化
+
+    def filter_image_gpu(img: torch.Tensor, window_size: int = 20) -> torch.Tensor:
+        """
+        入力画像の各縦列に対してGPU上でFFT処理を行い、
+        主成分周波数付近のみを抽出・正規化してフィルタリングを行う関数。
+        
+        Parameters:
+            img (torch.Tensor): 入力画像（形状 [H, W]、グレースケール、dtype uint8 または float32）。
+            window_size (int): 主成分周波数の前後に保持するサンプル数（デフォルト20）。
+        
+        Returns:
+            torch.Tensor: フィルタリング後の画像（形状 [H, W]、dtype uint8）をGPU上に保持。
+        """
+        device = img.device
+        # 入力がuint8の場合はfloat32にキャスト
+        if img.dtype != torch.float32:
+            img = img.float()
+        
+        H, W = img.shape
+
+        # FFT: 各縦列（dim=0）について並列にFFTを計算
+        # fft_signal の形状は [H, W]（複素数）
+        fft_signal = torch.fft.fft(img, dim=0)
+
+        # 振幅スペクトルの計算
+        mag = torch.abs(fft_signal)
+        # 各列のDC成分（index=0）は除外
+        mag[0, :] = 0.0
+
+        # 各列ごとに、最大振幅（主成分周波数）のインデックスを取得
+        # dominant_index の形状は [W]
+        dominant_index = torch.argmax(mag, dim=0)
+
+        # 各周波数軸上のインデックス [0, 1, ..., H-1] を生成して、[H, 1]に変換
+        indices = torch.arange(H, device=device).unsqueeze(1)  # shape: [H, 1]
+        
+        # 各列ごとに、主成分周波数からの差分を計算
+        # diff1: [H, W] 各要素が |i - dominant_index[col]| となる
+        diff1 = torch.abs(indices - dominant_index.unsqueeze(0))
+        mask1 = diff1 <= window_size
+
+        # 複素共役対称側の周波数は、各列で H - dominant_index に対応
+        sym_index = H - dominant_index
+        diff2 = torch.abs(indices - sym_index.unsqueeze(0))
+        mask2 = diff2 <= window_size
+
+        # 両方のマスクを論理和で合成
+        mask = mask1 | mask2  # shape: [H, W]
+        
+        # マスクを fft_signal と同じ複素数型に変換して乗算
+        fft_filtered = fft_signal * mask.to(fft_signal.dtype)
+
+        # 逆FFTで空間領域へ戻す（各縦列について並列に処理）
+        filtered_signal = torch.fft.ifft(fft_filtered, dim=0).real
+
+        # 各縦列ごとに正規化 (0～255) する：
+        # 各列で最小値と最大値を計算
+        min_vals = torch.amin(filtered_signal, dim=0, keepdim=True)
+        max_vals = torch.amax(filtered_signal, dim=0, keepdim=True)
+        denom = max_vals - min_vals
+        # ゼロ割を回避
+        denom[denom == 0] = 1.0
+        norm_signal = (filtered_signal - min_vals) / denom * 255.0
+
+        # 値を0-255の範囲にクリップして、uint8 に変換
+        norm_signal = torch.clamp(norm_signal, 0, 255)
+        return norm_signal.to(torch.uint8)
+
+
+    ref_bin=filter_image_gpu(ref_image)
+    exp_bin=filter_image_gpu(exp_image)
+
+    # エッジ検出 (Canny) を模倣 (PyTorchには直接的なCanny関数がないため、OpenCVを活用後テンソルに変換)
+    ref_edges = torch.tensor(cv2.Canny(ref_bin.cpu().numpy().astype(np.uint8), 100, 200), dtype=torch.float32, device=device)
+    exp_edges = torch.tensor(cv2.Canny(exp_bin.cpu().numpy().astype(np.uint8), 100, 200), dtype=torch.float32, device=device)
+
+    # エッジを1.0、それ以外を0にする
+    ref_edge_bin = (ref_edges > 0).float()
+    exp_edge_bin = (exp_edges > 0).float()
+
+    # location_embedding_vector の計算
+    location_embedding_vector = torch.arange(1, kernel_height + 1, device=device).flip(0)
+
+    # カーネルサイズ
+    kernel_size = (kernel_height, 1)
+
+    # カーネルごとに分割 (パディングなし)
+    micro_unfolded_ref = torch.tensor(ref_edge_bin).unfold(0, kernel_size[0], 1).unfold(1, kernel_size[1], 1).to(device)  # (H-2, W, kernel_height, kernel_width)
+    micro_unfolded_exp = torch.tensor(exp_edge_bin).unfold(0, kernel_size[0], 1).unfold(1, kernel_size[1], 1).to(device)  # (H-2, W, kernel_height, kernel_width)
+
+    # カーネルごとのデータを取得
+    micro_kernels_ref = micro_unfolded_ref.contiguous().view(-1, kernel_size[0] * kernel_size[1])  # (新しいH*W, kernel_height*kernel_width)
+    micro_kernels_exp = micro_unfolded_exp.contiguous().view(-1, kernel_size[0] * kernel_size[1])  # (新しいH*W, kernel_height*kernel_width)
+
+    # ミニバッチサイズの設定
+    num_batches = (micro_kernels_ref.size(0) + batch_size - 1) // batch_size  # バッチ数の計算
+
+    # 結果を格納するリスト
+    micro_refs = []
+    micro_exps = []
+
+    for i in range(num_batches):
+        # バッチの開始と終了インデックス
+        start_idx = i * batch_size
+        end_idx = min(start_idx + batch_size, micro_kernels_ref.size(0))
+        
+        # ミニバッチを切り出し
+        batch_kernels_ref = micro_kernels_ref[start_idx:end_idx]
+        batch_kernels_exp = micro_kernels_exp[start_idx:end_idx]
+        
+        # 各バッチでの計算
+        batch_located_ref = batch_kernels_ref * location_embedding_vector.to(device)
+        batch_located_exp = batch_kernels_exp * location_embedding_vector.to(device)
+
+        
+        # NaN を考慮した平均計算
+        batch_micro_ref = torch.where(
+            batch_located_ref != 0, batch_located_ref, torch.tensor(float('nan'), device=device)
+        ).nanmean(dim=1)
+        batch_micro_exp = torch.where(
+            batch_located_exp != 0, batch_located_exp, torch.tensor(float('nan'), device=device)
+        ).nanmean(dim=1)
+        
+        # 結果をリストに追加
+        micro_refs.append(batch_micro_ref)
+        micro_exps.append(batch_micro_exp)
+
+    # バッチごとの結果を結合
+    micro_ref = torch.cat(micro_refs, dim=0)
+    micro_exp = torch.cat(micro_exps, dim=0)
+
+    # シフト計算
+    shift_micro = micro_exp - micro_ref
+
+    # stripe_idx の計算
+    stripe_idx = ref_edge_bin.shape[0] / torch.sum(ref_edge_bin[:, 0])
+    # 累積和 (cumsum)
+    cumsum_array_ref = torch.cumsum(ref_edge_bin, dim=0)
+    cumsum_array_exp = torch.cumsum(exp_edge_bin, dim=0)
+    # numbered_ref, numbered_exp の計算
+    numbered_ref = ref_edge_bin * cumsum_array_ref * stripe_idx
+    numbered_exp = exp_edge_bin * cumsum_array_exp * stripe_idx
+    # stripe_idx の値を表示
+    print(stripe_idx.item())
+
+    # カーネルごとに分割 (パディングなし)
+    macro_unfolded_ref = numbered_ref.unfold(0, kernel_size[0], 1).unfold(1, kernel_size[1], 1).to(device)  # (H-2, W, kernel_height, kernel_width)
+    macro_unfolded_exp = numbered_exp.unfold(0, kernel_size[0], 1).unfold(1, kernel_size[1], 1).to(device)  # (H-2, W, kernel_height, kernel_width)
+
+    # カーネルごとのデータを取得
+    macro_kernels_ref = macro_unfolded_ref.contiguous().view(-1, kernel_size[0] * kernel_size[1])  # (新しいH*W, kernel_height*kernel_width)
+    macro_kernels_exp = macro_unfolded_exp.contiguous().view(-1, kernel_size[0] * kernel_size[1])  # (新しいH*W, kernel_height*kernel_width)
+
+    # 結果を格納するリスト
+    macro_refs = []
+    macro_exps = []
+
+    for i in range(num_batches):
+        # バッチの開始と終了インデックス
+        start_idx = i * batch_size
+        end_idx = min(start_idx + batch_size, macro_kernels_ref.size(0))
+        
+        # ミニバッチを切り出し
+        macro_batch_kernels_ref = macro_kernels_ref[start_idx:end_idx]
+        macro_batch_kernels_exp = macro_kernels_exp[start_idx:end_idx]
+        
+        # NaN を考慮した平均計算
+        batch_macro_ref = torch.where(
+            macro_batch_kernels_ref != 0, macro_batch_kernels_ref, torch.tensor(float('nan'), device=device)
+        ).nanmean(dim=1)
+        batch_macro_exp = torch.where(
+            macro_batch_kernels_exp != 0, macro_batch_kernels_exp, torch.tensor(float('nan'), device=device)
+        ).nanmean(dim=1)
+        
+        # 結果をリストに追加
+        macro_refs.append(batch_macro_ref)
+        macro_exps.append(batch_macro_exp)
+
+    # バッチごとの結果を結合
+    macro_ref = torch.cat(macro_refs, dim=0)
+    macro_exp = torch.cat(macro_exps, dim=0)
+
+    # シフト計算
+    shift_macro = macro_exp - macro_ref
+
+    shift=shift_micro+shift_macro
+    # 結果を元の形に戻す
+    result_height = ref_edge_bin.shape[0] - kernel_size[0] + 1
+    result_width = ref_edge_bin.shape[1]
+    result = shift.view(result_height, result_width)
+
+    # 各列の最初の10行の平均を計算
+    column_means = result[:500, :].mean(dim=0)
+
+    # 各列から平均を引き算
+    adjusted_data = result - column_means
+
+    result_gpu1_reconstructed = adjusted_data.view(adjusted_data.shape[0], adjusted_data.shape[1])
+
+    return result_gpu1_reconstructed.cpu().numpy()

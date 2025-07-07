@@ -19,6 +19,7 @@ INSTALL_REQUIRES = [
     'numpy>=1.20.3, <2.0',
     'tqdm >=4.0',
     'pandas >=1.0',
+    "cv2"
 ]
 
 EXTRAS_REQUIRE = {

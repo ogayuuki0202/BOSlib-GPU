@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: BOSlib-GPU
-Version: 0.0.6
+Version: 0.0.7
 Summary: the library of Background Oriented Schlieren
 Home-page: https://github.com/ogayuuki0202/BOSlib-GPU
 Download-URL: https://github.com/ogayuuki0202/BOSlib-GPU
@@ -27,6 +27,7 @@ License-File: LICENSE
 Requires-Dist: numpy<2.0,>=1.20.3
 Requires-Dist: tqdm>=4.0
 Requires-Dist: pandas>=1.0
+Requires-Dist: cv2
 
 # BOSlib-GPU
 This library is the extra pacage for [BOSlib](https://github.com/ogayuuki0202/BOSlib) that makes GPU parallel processing available.
